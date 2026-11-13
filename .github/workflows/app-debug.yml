@@ -1,0 +1,100 @@
+name: Build and release color-picker APK
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: color-picker-release
+  cancel-in-progress: false
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Extract Android Studio source
+        run: unzip -q source.zip -d android-project
+
+      - name: Build debug APK
+        working-directory: android-project
+        run: gradle --no-daemon --stacktrace --console=plain assembleDebug
+
+      - name: Copy built APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp android-project/app/build/outputs/apk/debug/app-debug.apk color-picker.apk
+          test -s color-picker.apk
+
+      - name: Upload APK as Actions artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: color-picker-apk
+          path: color-picker.apk
+          if-no-files-found: error
+
+      - name: Publish only APK to GitHub Releases
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          TAG='v1.0.7'
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" color-picker.apk --clobber
+          else
+            gh release create "$TAG" color-picker.apk --title 'color-picker v1.0.7' --notes 'Automatically built debug APK for testing. This is not a production-signed release.'
+          fi
+          while IFS= read -r asset; do
+            if [[ -n "$asset" && "$asset" != 'color-picker.apk' ]]; then
+              gh release delete-asset "$TAG" "$asset" --yes
+            fi
+          done < <(gh release view "$TAG" --json assets --jq '.assets[].name')
+          echo 'Published APK release:'
+          gh release view "$TAG" --json assets --jq '.assets[].name'
+
+      - name: Package private full ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release/.github/workflows release/tutorial
+          cp source.zip color-picker.apk release/
+          if [[ -f apk-version.txt ]]; then
+            cp apk-version.txt release/
+          else
+            printf '1.0.7\n' > release/apk-version.txt
+          fi
+          if [[ -f README.txt ]]; then cp README.txt release/; fi
+          cp .github/workflows/app-debug.yml release/.github/workflows/
+          if [[ -d tutorial ]]; then cp -a tutorial/. release/tutorial/; fi
+          if [[ -z "$(ls -A release/tutorial)" ]]; then
+            printf '%s\n' 'color-picker v1.0.7' 'GitHub Actions builds the APK; Releases contain only color-picker.apk.' > release/tutorial/README.txt
+          fi
+          ( cd release && zip -qr ../color-picker-v1.0.7-FULL-with-APK.zip . )
+          unzip -tq color-picker-v1.0.7-FULL-with-APK.zip
+
+      - name: Upload private full ZIP as Actions artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: color-picker-v1.0.7-FULL-with-APK
+          path: color-picker-v1.0.7-FULL-with-APK.zip
+          if-no-files-found: error
